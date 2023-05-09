@@ -1,0 +1,733 @@
+---
+title: Predicting gene expression from leaf-level reflectance data in cotton
+subtitle: WGCNA, Enrichment Analysis of Upper 30% of Predictable Gene Transcripts
+author: Emmanuel Gonzalez
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: 4
+    number_sections: true
+    fig_width: 7
+    fig_height: 6
+  html_document:
+    toc: yes
+    df_print: paged
+  md_document:
+    toc: yes
+    variant: markdown_github
+  word_document:
+    toc: yes
+fontsize: 11pt
+geometry: margin=1in
+---
+
+\newpage
+
+```{r, include=FALSE}
+library(WGCNA)
+library(cluster)
+library(dplyr)
+library(pheatmap)
+library(stringr)
+library(RColorBrewer)
+library(viridis)
+library(matrixStats)
+library(ggplot2)
+library(ggpubr)
+library(tidyr)
+library(cowplot)
+library(knitr)
+library(dendextend)
+library(fpc)
+library(knitr)
+library(formatR)
+library(lemon)
+library(AnnotationHub)
+library(clusterProfiler)
+require(dplyr)
+require(stringr)
+library(enrichplot)
+library(stats)
+library("ggrepel")
+library(GOSemSim)
+library(glue)
+library("AnnotationDbi")
+library(readr)
+library(data.table)
+library(gridExtra)
+library(ggplot2)
+library(pathview)
+require(grid)
+require(png)
+library(imager)
+library(pander)
+library(R.utils)
+library(KEGGREST)
+library(KEGG.db)
+library(openxlsx)
+library(lemon)
+set.seed(123)
+
+knit_print.data.frame <- lemon_print
+options(stringsAsFactors = FALSE)
+enableWGCNAThreads(nThreads = 94)
+cor=WGCNA::cor
+Sys.setenv(FONTCONFIG_PATH="/usr/share/font")
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+R.utils::setOption("clusterProfiler.download.method","auto")
+# R.utils::setOption("clusterProfiler.download.method","auto")
+# R.utils::setOption("clusterProfiler.download.method","wget")
+# R.utils::setOption("clusterProfiler.download.method","curl")
+
+# --------------------------------------------------
+enrichment_analysis <- function(df, plot_name, cyverse_base){
+  
+  hub <- AnnotationHub()
+  Ghirsutum <- hub[["AH107399"]]
+  
+  # GO Enrichment
+  
+  all <- read.csv(paste(cyverse_base, "complete_updated.csv", sep = ""))
+  all_ids <- bitr(all$description,
+                  fromType="GENENAME",
+                  toType=c("ENTREZID", "GID"),
+                  OrgDb=Ghirsutum)
+  
+  out_dir <- "enrichment_hyperspectral_2023-03-09"
+  N_cat <- 15 #30
+  lay <- "nicely"
+
+  
+  ids <- bitr(df$description, 
+              fromType="GENENAME",
+              toType=c("ENTREZID", "GID"),
+              OrgDb=Ghirsutum)
+  
+  num_transcripts <- length(unique(ids$GID))
+  # print(num_transcripts)
+  subon <- list("CC", "MF", "BP") #"ALL", "MF")
+
+  for (x in subon) {
+
+    ego <- enrichGO(ids$GID,
+                    Ghirsutum,
+                    keyType = "GID",
+                    ont = x,
+                    pAdjustMethod = "fdr",
+                    qvalueCutoff = 0.05,
+                    # minGSSize = 3,
+                    # maxGSSize = 500,
+                    readable=T,
+                    universe=all_ids$GID)
+    
+    ego <- gofilter(ego, level = 4)
+    if (nrow(data.frame(head(ego))) <= 1) {
+      # print("No significant enrichment.")
+      edo <- NULL
+      go_fig <- NULL
+    } else {
+
+      edo <- pairwise_termsim(ego)
+      edo@result[["Description"]] = str_to_sentence(edo@result[["Description"]])
+      result <- filter(edo@result[order(edo@result$p.adjust, decreasing = F),], p.adjust <=0.05)
+      terms <- result$Description[1:N_cat]
+      
+      # go_fig <- cnetplot(edo, layout=lay, colorEdge = FALSE, circular = FALSE, cex_label_category=0.5, cex_label_gene=0.1, node_label="category", showCategory = N_cat) + ggtitle(paste("GO", str_to_title(plot_name), sep=' - ')) + theme(plot.title = element_text(size = 20, face = "bold"), plot.background = element_rect(fill = "white"))
+      go_fig <- dotplot(edo, font.size = 10, label_format = 50, showCategory = N_cat, color="p.adjust") + ggtitle(paste("GO", str_to_title(plot_name), sep=' - ')) + theme(plot.title = element_text(size = 15, face = "bold"), plot.background = element_rect(fill = "white"))
+      ggsave(go_fig, file=paste("upper30_go_", x, "_cnetplot.jpeg", sep = ""), dpi = 900)
+      fwrite(result, paste("upper30_go_", x, "enrichment.csv", sep = ""))
+      # go_fig <- dotplot(edo, font.size = 6, label_format = 50, showCategory = N_cat, color="p.adjust", split="ONTOLOGY") + facet_grid(ONTOLOGY~., scale="free") + theme(axis.text = element_text(face="bold")) + ggtitle(str_to_title(plot_name)) + theme(plot.title = element_text(size = 20, face = "bold"))
+    }
+
+  }
+  
+  # KEGG Enrichment
+  kk <- enrichKEGG(gene=ids$GID,
+                   keyType="ncbi-geneid", 
+                   pAdjustMethod="fdr",
+                   organism="ghi",
+                   # pvalueCutoff=0.05,
+                   qvalueCutoff = 0.05,
+                   # minGSSize=30,
+                   universe=all_ids$GID)
+                   # use_internal_data =T)
+  
+  if (nrow(data.frame(head(kk))) <= 1) {
+    # print("No significant enrichment.")
+    kegg_fig <- NULL
+    kk_res <- NULL
+  } else {
+    kk_res <- pairwise_termsim(kk)
+    # kk_res <- kk
+    kk_res@result[["Description"]] = str_replace(kk_res@result[["Description"]], " - Gossypium hirsutum \\(upland cotton\\)", "")
+    result <- filter(kk_res@result[order(kk_res@result$p.adjust, decreasing = F),], p.adjust <=0.05) #Count, TRUE
+    terms <- result$Description[1:N_cat]
+    
+    # kegg_fig <- dotplot(kk_res, font.size = 10, label_format = 50, showCategory = N_cat, color="p.adjust") + theme(axis.text = element_text(face="bold")) + ggtitle(paste("KEGG", str_to_title(plot_name), sep=' - ')) + theme(plot.title = element_text(size = 20, face = "bold"))
+    # kegg_fig <- cnetplot(kk_res, layout=lay, colorEdge = FALSE, circular = FALSE, cex_label_category=0.5, cex_label_gene=0.1, node_label="category", showCategory = N_cat) + ggtitle(paste("KEGG", str_to_title(plot_name), sep=' - ')) + theme(plot.title = element_text(size = 20, face = "bold"), plot.background = element_rect(fill = "white"))
+    kegg_fig <- dotplot(kk_res, font.size = 10, label_format = 50, showCategory = N_cat, color="p.adjust") + ggtitle(paste("KEGG", str_to_title(plot_name), sep=' - ')) + theme(plot.title = element_text(size = 15, face = "bold"), plot.background = element_rect(fill = "white"))
+    ggsave(kegg_fig, file="upper30_kegg_cnetplot.jpeg", dpi = 900)
+    fwrite(result, "upper30_kegg_enrichment.csv")
+  return(list("go_plot"= go_fig, "kegg_plot" = kegg_fig, "go_data"=edo, "kegg_data" = kk_res, "gene_list" = ids))
+  }
+
+}
+
+# --------------------------------------------------
+run_enrichment_analysis <- function(datExpr, colors, cy_base){
+  out <- data.frame(
+    gene = colnames(datExpr),
+    module = colors)
+  
+  mods = unique(colors)
+  go_list = c()
+  kegg_list = c()
+  mkegg_list = c()
+  
+  for (mod in mods){
+
+    temp = subset(out, module == mod)
+    result = filter(dat, dat$Gene %in% temp$gene)
+    result = enrichment_analysis(df = result, plot_name = mod, cyverse_base=cy_base)
+    id = result$gene_list
+    
+    try ({
+      
+      create_section(name=str_to_title(mod), level=4)
+      # print(result$go_plot)
+      print(result$kegg_plot)
+
+      go_res = result$go_data
+      go_list[[mod]] = go_res@result #$Description
+
+      kk_res = result$kegg_data
+      kegg_list[[mod]] = kk_res@result #$Description
+      
+      # see_pathview(result = result, plot_name = mod)
+      
+      cat("\n\n\\newpage\n")
+      
+    }, silent = TRUE)
+  }
+  return(list("kegg_results" = kegg_list))  #"gene_list" = result, 
+}
+
+# --------------------------------------------------
+auto_wgcna <- function(datExpr){
+
+  net = blockwiseModules(datExpr,
+                         power = 30,
+                         TOMType = "unsigned",
+                         deepSplit = 4,
+                         maxBlockSize = 440000,
+                         minModuleSize = 10,
+                         reassignThreshold = 0, 
+                         mergeCutHeight = 0.05, 
+                         numericLabels = TRUE,
+                         pamRespectsDendro = FALSE,
+                         saveTOMs = FALSE,
+                         verbose = 0)
+  
+  # Convert labels to colors for plotting
+  mergedColors = labels2colors(net$colors)
+  # Plot the dendrogram and the module colors underneath
+  plot <- plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]], "Module colors", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+  moduleLabels = net$colors
+  moduleColors = labels2colors(net$colors)
+  MEs = net$MEs;
+  geneTree = net$dendrograms[[1]];
+  return(list("result"= net, "colors" = moduleColors, "plot" = plot, "MEs" = MEs))
+}
+
+# --------------------------------------------------
+eigengene_plot <- function(moduleColors) {
+
+  Module_count <- as.data.frame(table(moduleColors))
+  
+  MEs0 <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+  
+  MEs <- MEs0
+  MEs$Sample <- rownames(MEs0)
+  MEs$Name <- rownames(MEs0)
+  MEs$Accession <- str_replace_all(MEs$Name, c("_WL"="", "_WW"=""))
+  MEs$Condition <- str_split_i(MEs$Name, pattern="_", i=-1)
+  MEs$Time <- 1
+  
+  ### Plot Eigengene value for each module in a line graph mode
+  for (i in colnames(MEs0)) {
+    plot <- ggplot(MEs,aes(x = Accession, y = get(i), color = Condition)) + 
+            # geom_line(alpha = 0.3,linewidth = 1, aes(group= Condition)) + 
+            geom_point(aes(group= Condition)) + 
+            theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+            ylab(paste0("Eigengene value of ", i))
+    print(plot)
+    # return(list("data" = MEs, "plot" = plot))
+  }
+}
+
+# --------------------------------------------------
+see_pathview <- function(result, plot_name, save_image = FALSE) {
+  
+  kk_res <- result$kegg_data@result
+  
+  for (id in kk_res[kk_res$qvalue < 0.05,]$ID) {
+    try ({
+      filename = paste(id, ".pathview.png", sep = "")
+      pathview(gene.data = result$gene_list$GID, pathway.id = id, species = "ghi")
+      image <- load.image(filename)
+      plot(image, axes=FALSE)
+    }, silent = TRUE)
+  }
+}
+# --------------------------------------------------
+create_section <- function(name, level=1) {
+  pander::pandoc.header(name, level) %>% cat()
+}
+
+# --------------------------------------------------
+module_relationship <- function(MEs, abundance_path, annotation_path, kind="superclass") {
+  corType = "pearson"
+  robustY = ifelse(corType=="pearson",T,F)
+  module_relationship_list = c()
+  # geneModuleMembership_list = c()
+  # Metabolite_GS_list = c()
+  
+  ##Get the data
+  cyverse_base_met = "https://data.cyverse.org/dav-anon/iplant/projects/phytooracle/2019_cotton/level_0/metabolite_data/"
+  gcms = read.csv(paste(cyverse_base_met, abundance_path, sep = "/"))
+  gcms = gcms[, -c(1, 3, 4, 6, 7, 8, 9)]
+  gcms$genotype<-as.factor(gcms$genotype)
+  gcms$treatment<-as.factor(gcms$treatment)
+  gcms = gcms %>%
+    group_by(genotype, treatment) %>%
+    summarise_all("mean")
+  gcms <- as.data.frame(gcms)
+  rownames(gcms) = paste0(toupper(gcms$genotype), '_', toupper(gcms$treatment), sep = '')
+  gcms = gcms[, -c(1, 2)]
+  datTrait_ave = gcms
+  datTrait_ave = datTrait_ave[!(row.names(datTrait_ave) %in% setdiff(rownames(datTrait_ave), rownames(MEs))),]
+  
+  ##Add annotation
+  annot = read.xlsx(paste(cyverse_base_met, annotation_path, sep = "/"))
+  subclass_list = unique(annot[[kind]]) #subclass)
+  
+  for (sub in subclass_list) {
+    try ({
+      test = drop_na(annot[annot[[kind]] == sub,]) #subclass
+      nrs = c(unique(test$Known_nr))
+      
+      if (length(nrs) == 0) {
+        nrs = c(unique(test$known_nr))
+      } else {
+      }
+      
+      filtered = datTrait_ave[nrs]
+      ##Build correlation between oxdative status data and expression module
+      if (corType=="pearson") {
+        modOXCor = cor(MEs, filtered[,colnames(filtered)], use = "p")
+        modOXP = corPvalueStudent(modOXCor, nSamples)
+      } else {
+        modOXCorP = bicorAndPvalue(MEs_col, colnames(filtered) , robustY=robustY)
+        modOXCor = modOXCorP$bicor
+        modOXP   = modOXCorP$p
+      }
+    
+      textMatrix1 = paste(signif(modOXCor, 2), "\n(", signif(modOXP, 1), ")", sep = "")
+      dim(textMatrix1) = dim(modOXCor)
+    
+      modOXCor_results <- as.data.frame(modOXCor)
+      modOXP_results <- as.data.frame(modOXP)
+    
+      min_corr = min(modOXCor_results)
+      max_corr = max(modOXCor_results)
+    
+      # labeledHeatmap(Matrix = modOXCor, xLabels = colnames(filtered),
+      #                yLabels = colnames(MEs),
+      #                cex.lab = 0.5,
+      #                ySymbols = colnames(MEs), colorLabels = TRUE,
+      #                colors = blueWhiteRed(50),
+      #                textMatrix = textMatrix1, setStdMargins = TRUE,
+      #                cex.text = 0.25, zlim = c(-1,1),
+      #                main = paste(paste('Module', sub, sep = ' - '), "relationship", sep = " "))
+      col_names = as.data.frame(colnames(filtered))
+      module_relationship_list[[sub]] = modOXP_results
+      colnames(module_relationship_list[[sub]]) = colnames(filtered)
+      
+    }, silent = TRUE)
+  }
+  
+  # Module membership
+  modNames <- substring(names(MEs), 3)
+  geneModuleMembership <- as.data.frame(abs(cor(datExpr, MEs, use = "p")))
+  MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+  names(geneModuleMembership) = paste("MM", modNames, sep="")
+  names(MMPvalue) = paste("p.MM", modNames, sep="")
+  
+  # Gene significance
+  Metabolite_list <- colnames(datTrait_ave)
+  Metabolite_GS <- data.frame(matrix(ncol = length(Metabolite_list) , nrow = ncol(datExpr)))
+  Metabolite_Pvalue <- data.frame(matrix(ncol = length(Metabolite_list) , nrow = ncol(datExpr)))
+  
+  for (i in 1:length(Metabolite_list)){
+    metab <- datTrait_ave[,colnames(datTrait_ave) == Metabolite_list[i]]
+    # Metabolite_GS[,i] <- as.data.frame(cor(datExpr, metab, use = "p"))
+    Metabolite_GS[,i] <- as.data.frame(abs(cor(datExpr, metab, use = "p")))
+    colnames(Metabolite_GS)[i] <- Metabolite_list[i]
+    rownames(Metabolite_GS) <- colnames(datExpr)
+  }
+  
+  return(list("result" = module_relationship_list, "module_membership" = geneModuleMembership, "module_membership_p_val" = MMPvalue, "gene_significance" = Metabolite_GS, "annotation" = annot))
+
+}
+
+# --------------------------------------------------
+create_df <- function(df_list, threshold, df_names) {
+  # initialize an empty data frame to store the results
+  result_df <- data.frame(df = character(), row = character(), column = character(), value = numeric(), stringsAsFactors = FALSE)
+  
+  # loop through each data frame in the list
+  for (i in seq_along(df_list)) {
+    # get the current data frame
+    df <- df_list[[i]]
+    
+    # find the row and column indices of values below the threshold
+    indices <- which(df < threshold, arr.ind = TRUE)
+    
+    # get the row and column names of values below the threshold
+    rows <- rownames(df)[indices[, 1]]
+    cols <- colnames(df)[indices[, 2]]
+    
+    # get the values below the threshold
+    values <- df[indices]
+    
+    # create a temporary data frame to store the results for this data frame
+    temp_df <- data.frame(df = rep(df_names[i], length(rows)), row = rows, column = cols, value = values, stringsAsFactors = FALSE)
+    
+    # add the temporary data frame to the result data frame
+    result_df <- rbind(result_df, temp_df)
+  }
+  
+  return(result_df)
+}
+
+# --------------------------------------------------
+plot_significant_genes <- function(result, threshold = 0.5, category = "class") {
+
+  # Select genes with significance values above the threshold for each trait
+  significant_genes <- apply(result$gene_significance, 2, function(x) rownames(result$gene_significance)[x > threshold])
+
+  # Convert the result to a named list
+  significant_genes_list <- as.list(significant_genes)
+  names(significant_genes_list) <- colnames(result$gene_significance)
+
+  # Convert the list to a long format data frame
+  significant_genes_long <- stack(significant_genes_list)
+
+  # Check if the Known_nr column exists in the result$annotation data frame
+  if ("Known_nr" %in% colnames(result$annotation)) {
+    # Use Known_nr as the by.y value
+    by_y <- "Known_nr"
+  } else {
+    # Use known_nr as the by.y value
+    by_y <- "known_nr"
+  }
+
+  # Merge the significant_genes_long and result$annotation data frames
+  merged_df <- merge(significant_genes_long, result$annotation, by.x = "ind", by.y = by_y)
+  # # Merge the significant_genes_long and result$annotation data frames
+  # merged_df <- merge(significant_genes_long, result$annotation, by.x = "ind", by.y = "Known_nr")
+
+  # Select the relevant columns
+  result_df <- merged_df[, c("values", category)]
+
+  # Rename the columns
+  colnames(result_df) <- c("gene", "Category")
+
+  # Find the best fitting module for each gene
+  best_module <- colnames(result$module_membership)[apply(result$module_membership, 1, which.max)]
+
+  # Create a data frame of genes and their best fitting modules
+  best_module_df <- data.frame(gene = rownames(result$module_membership), module = best_module)
+
+  # Merge the best_module_df and result_df data frames
+  merged_df <- merge(best_module_df, result_df, by = "gene")
+
+  plot <- ggplot(merged_df, aes(x = module, fill = Category)) +
+  geom_bar(position = "stack") +
+  labs(x = "Module", y = "Count of Genes within Categroy", fill = "Category") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+  return(list("result" = merged_df, "plot" = plot))
+}
+
+# --------------------------------------------------
+# plot_significant_genes <- function(result, threshold = 0.5, category = "class") {
+#   
+#   # Select genes with significance values above the threshold for each trait
+#   significant_genes <- apply(result$gene_significance, 2, function(x) rownames(result$gene_significance)[x > threshold])
+#   
+#   # Convert the result to a named list
+#   significant_genes_list <- as.list(significant_genes)
+#   names(significant_genes_list) <- colnames(result$gene_significance)
+#   
+#   # Convert the list to a long format data frame
+#   significant_genes_long <- stack(significant_genes_list)
+#   
+#   # Check if the Known_nr column exists in the result$annotation data frame
+#   if ("Known_nr" %in% colnames(result$annotation)) {
+#     # Use Known_nr as the by.y value
+#     by_y <- "Known_nr"
+#   } else {
+#     # Use known_nr as the by.y value
+#     by_y <- "known_nr"
+#   }
+# 
+#   # Merge the significant_genes_long and result$annotation data frames
+#   merged_df <- merge(significant_genes_long, result$annotation, by.x = "ind", by.y = by_y)
+#   
+#   # Select the relevant columns
+#   result_df <- merged_df[, c("values", category)]
+# 
+#   # Rename the columns
+#   colnames(result_df) <- c("gene", "Category")
+# 
+#   # Find the best fitting module for each gene
+#   best_module <- colnames(result$module_membership)[apply(result$module_membership, 1, which.max)]
+# 
+#   # Create a data frame of genes and their best fitting modules
+#   best_module_df <- data.frame(gene = rownames(result$module_membership), module = best_module)
+# 
+#   # Merge the best_module_df and result_df data frames
+#   merged_df <- merge(best_module_df, result_df, by = "gene")
+# 
+#   # Add gene significance and module membership values to merged_df
+#   merged_df$gene_significance <- result$gene_significance[match(merged_df$gene, rownames(result$gene_significance)), by_y]
+#   merged_df$module_membership <- result$module_membership[match(merged_df$gene, rownames(result$module_membership)), by_y]
+# 
+#   plot <- ggplot(merged_df, aes(x = module, fill = Category)) +
+#     geom_bar(position = "stack") +
+#     labs(x = "Module", y = "Count of Genes within Category")
+#   
+#   return(list("data" = merged_df, "plot" = plot))
+# }
+```
+
+
+```{r, include=FALSE}
+out_dir <- "wgcna_plots"
+if (!dir.exists(out_dir)){
+  dir.create(out_dir)
+}else{
+  print("dir exists")
+}
+
+# Upper 20
+# cyverse_base <- "https://data.cyverse.org/dav-anon/iplant/projects/phytooracle/2019_cotton/level_3/rnaseq_hyperspectral/2019-08-27/v8/"
+
+#Upper 30
+cyverse_base <- "https://data.cyverse.org/dav-anon/iplant/projects/phytooracle/2019_cotton/level_3/rnaseq_hyperspectral/2019-08-27/v9/"
+
+TPM_clean <- read.csv(paste(cyverse_base, "Cotton_TPM_TOP25.csv", sep = ""), header = T)
+
+# Format the dataframe
+rownames(TPM_clean) <- TPM_clean$Gene
+TPM_clean$Gene <- NULL
+# TPM_clean <- TPM_clean[ , order(names(TPM_clean))]
+
+# Filter transcripts
+datExpr <- as.data.frame(t(TPM_clean[order(apply(TPM_clean,1,mad), decreasing = T)[1:nrow(TPM_clean)],]))
+# datExpr <- as.data.frame(t(TPM_clean))
+
+dat <- read.csv(paste(cyverse_base, "upper_updated.csv", sep = ""), header = T)
+dat$Gene = gsub('Gh_', 'Gohir.', dat$Gene)
+
+datExpr = datExpr[, which((names(datExpr) %in% dat$Gene)==TRUE)]
+rownames(datExpr) = toupper(rownames(datExpr))
+
+# ADDED
+# datExpr <- datExpr[str_detect(rownames(datExpr), "_WW"), ]
+```
+
+# Pre-WGCNA
+
+## Treatment Effects
+```{r, message=FALSE, error=FALSE, warning=FALSE, results='hide',fig.keep='all'}
+#Cluster tress (check if any outliers existed among samples)
+datExpr_tree <- hclust(dist(datExpr), method = "average")
+par(mar = c(0,5,2,0))
+plot(datExpr_tree, main = "Sample clustering", sub="", xlab="", cex.lab = 2, 
+     cex.axis = 1, cex.main = 1,cex.lab=1, cex=1.5)
+```
+
+\newpage
+
+## KEGG Enrichment Analysis
+```{r, message=FALSE, error=FALSE, warning=FALSE, results='hide',fig.keep='all', fig.align = 'center', out.width = '100%'}
+result = enrichment_analysis(df = dat, plot_name = 'Full Upper 30%', cyverse_base = cyverse_base)
+print(result$go_plot)
+print(result$kegg_plot)
+```
+
+\newpage
+
+## KEGG Pathway Visualization
+```{r, message=FALSE, error=FALSE, warning=FALSE, results='hide',fig.keep='all', fig.align = 'center', out.width = '100%'}
+see_pathview(result = result, plot_name = 'Full Upper 30%')
+```
+
+\newpage
+
+# WGCNA 
+
+## Soft thresholding
+```{r,results='hide'}
+# Set powers to sample
+powers = c(c(1:10), seq(from = 12, to=80, by=2))
+
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 0)
+k <- softConnectivity(datE=datExpr,power=sft$powerEstimate) 
+
+# Plot the results:
+par(mfrow = c(1,2));
+cex1 = 0.9;
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+
+# Mean connectivity as a function of the soft-thresholding power
+fig <- plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity")) 
+
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+
+```{r, results='hide',fig.keep='all'}
+par(mfrow = c(1,2));
+hist(k)
+scaleFreePlot(k,main="Check Scale free topology\n")
+```
+
+\newpage
+
+## Network Analysis & Module Detection
+```{r, message=FALSE, error=FALSE, warning=FALSE, results='hide',fig.keep='all'}
+# Run WGCNA
+wgcna_result = auto_wgcna(datExpr = datExpr)
+print(wgcna_result$plot)
+```
+
+<!-- \newpage -->
+
+<!-- ### Eigengene values across samples from each module -->
+<!-- ```{r} -->
+<!-- eigen_result = eigengene_plot(moduleColors = wgcna_result$colors) -->
+<!-- ``` -->
+
+\newpage
+
+### Enrichment Analysis & Pathway Visualization
+```{r, message=FALSE, error=FALSE, warning=FALSE, results='asis', echo=FALSE, fig.keep='all', fig.align = 'center'}
+# enrichment_result = run_enrichment_analysis(datExpr = datExpr, colors = wgcna_result$colors, cy_base=cyverse_base)
+```
+
+```{r, include=FALSE}
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+moduleColors <- wgcna_result$colors
+MEs0 <- moduleEigengenes(datExpr, moduleColors)$eigengenes
+MEs <- orderMEs(MEs0)
+```
+
+\newpage
+
+## Gene Significance & Module Membership
+
+### GCMS
+```{r, message=FALSE, error=FALSE, warning=FALSE, echo=FALSE,fig.keep='all'}
+gcms_rel = module_relationship(MEs = MEs, abundance_path="GCMS/1_GCMS_abundance_2019.csv", annotation_path = "GCMS/0_GCMS_annotation_2019.xlsx", kind="class")
+
+# gcms_result = generate_heatmaps(result = gcms_rel, category = "class")
+# print(gcms_result$strength_heatmap)
+# print(gcms_result$count_heatmap)
+
+gcms_result_df = plot_significant_genes(result = gcms_rel, threshold = 0.5, category = "class")
+print(gcms_result_df$plot)
+```
+
+\newpage
+
+```{r, message=FALSE, error=FALSE, warning=FALSE, echo=FALSE, render=lemon_print, align='c'}
+colnames(gcms_result_df$result) <- c("Gene", "Module", "Category")
+gcms_result_df$result
+```
+
+\newpage
+
+### LCMS
+```{r, message=FALSE, error=FALSE, warning=FALSE, echo=FALSE,fig.keep='all'}
+lcms_rel = module_relationship(MEs = MEs, abundance_path="LCMS/1_LCMS_abundance_2019.csv", annotation_path = "LCMS/0_LCMS_annotation_2019.xlsx", kind="class")
+
+# lcms_result = generate_heatmaps(result = lcms_rel, category = "class")
+# print(lcms_result$strength_heatmap)
+# print(lcms_result$count_heatmap)
+
+lcms_result_df = plot_significant_genes(result = lcms_rel, threshold = 0.5, category = "class")
+print(lcms_result_df$plot)
+```
+
+\newpage
+
+```{r, message=FALSE, error=FALSE, warning=FALSE, echo=FALSE, render=lemon_print, align='c'}
+colnames(lcms_result_df$result) <- c("Gene", "Module", "Category")
+lcms_result_df$result
+```
+
+```{r}
+gcms_hub = gcms_result_df$result
+gcms_hub$MetaboliteDataType = "GCMS"
+
+lcms_hub = lcms_result_df$result
+lcms_hub$MetaboliteDataType = "LCMS"
+
+hubs = rbind(gcms_hub, lcms_hub)
+fwrite(hubs, "hub_genes.csv")
+```
+
+<!-- ```{r} -->
+<!-- hubs = chooseTopHubInEachModule(datExpr, wgcna_result$colors) -->
+<!-- as.data.frame(hubs) -->
+<!-- ``` -->
+```{r}
+cat(paste(sort(unique(hubs$Module))))
+```
+
+```{r}
+length(unique(hubs$Gene))
+```
+
+```{r}
+unique(hubs[hubs$MetaboliteDataType == "GCMS",]$Category)
+```
+
+```{r}
+hubs[hubs$MetaboliteDataType == "GCMS" & hubs$Category =="Indoles and derivatives",]
+```
+
+```{r}
+unique(hubs[hubs$MetaboliteDataType == "LCMS",]$Category)
+```
+
+```{r}
+hubs[hubs$MetaboliteDataType == "LCMS" & hubs$Category =="Fatty Acyls",]
+```
+
